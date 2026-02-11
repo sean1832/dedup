@@ -21,6 +21,7 @@ typedef struct {
     unsigned __int64 size;
     unsigned long crc;
     BYTE md5[16];
+    int error;
 } FileInfo;
 
 typedef struct {
@@ -89,14 +90,36 @@ void json_escape_print(FILE *stream, const wchar_t *str) {
     free(utf8_str);
 }
 
+// Helper to print UTF-8 to file (avoids fwprintf/binary stream issues)
+void print_utf8_to_stream(FILE *stream, const wchar_t *str) {
+    int utf8_len = WideCharToMultiByte(CP_UTF8, 0, str, -1, NULL, 0, NULL, NULL);
+    char *utf8_str = malloc(utf8_len);
+    if (!utf8_str) return;
+    WideCharToMultiByte(CP_UTF8, 0, str, -1, utf8_str, utf8_len, NULL, NULL);
+    fprintf(stream, "%s", utf8_str);
+    free(utf8_str);
+}
+
 // --- Output helper ---
 void report_duplicates(OutputContext *ctx, FileInfo **group, size_t count) {
     if (ctx->format == FORMAT_TEXT) {
-        fwprintf(ctx->stream, L"MATCH:\n");
-        for (size_t i = 0; i < count; i++) {
-            fwprintf(ctx->stream, L"   %ls\n", group[i]->path);
+        if (ctx->stream == stdout) {
+            // Console output (let CRT handle wide chars)
+            wprintf(L"MATCH:\n");
+            for (size_t i = 0; i < count; i++) {
+                wprintf(L"   %ls\n", group[i]->path);
+            }
+            wprintf(L"----------------------------------------\n");
+        } else {
+            // File output (force UTF-8 on binary stream)
+            fprintf(ctx->stream, "MATCH:\n");
+            for (size_t i = 0; i < count; i++) {
+                fprintf(ctx->stream, "   ");
+                print_utf8_to_stream(ctx->stream, group[i]->path);
+                fprintf(ctx->stream, "\n");
+            }
+            fprintf(ctx->stream, "----------------------------------------\n");
         }
-        fwprintf(ctx->stream, L"----------------------------------------\n");
     }
     else if (ctx->format == FORMAT_JSON) {
         if (!ctx->first_json_entry) {
@@ -141,7 +164,8 @@ unsigned long update_crc32(unsigned long crc, const BYTE *buf, size_t len) {
 }
 
 // --- Hashing Wrappers ---
-unsigned long get_file_crc(const wchar_t *path) {
+// --- Hashing Wrappers ---
+int get_file_crc(const wchar_t *path, unsigned long *out_crc) {
     FILE *f = _wfopen(path, L"rb");
     if (!f) return 0;
     if (!crc_initialized) init_crc32();
@@ -153,7 +177,8 @@ unsigned long get_file_crc(const wchar_t *path) {
         crc = update_crc32(crc, buffer, n);
     }
     fclose(f);
-    return crc;
+    *out_crc = crc;
+    return 1;
 }
 
 int get_file_md5(const wchar_t *path, BYTE *output) {
@@ -192,7 +217,7 @@ void list_add(FileList *list, wchar_t *path, unsigned __int64 size) {
         list->capacity = (list->capacity == 0) ? 1024 : list->capacity * 2;
         list->files = realloc(list->files, list->capacity * sizeof(FileInfo*));
     }
-    FileInfo *fi = malloc(sizeof(FileInfo));
+    FileInfo *fi = calloc(1, sizeof(FileInfo));
     fi->path = _wcsdup(path);
     fi->size = size;
     list->files[list->count++] = fi;
@@ -211,6 +236,9 @@ void scan_dir(const wchar_t *basePath, FileList *list) {
 
     do {
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        
+        // Skip reparse points (symlinks/junctions) to avoid infinite loops
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
 
         wchar_t fullPath[PATH_BUF_SIZE];
         swprintf(fullPath, PATH_BUF_SIZE, L"%ls\\%ls", basePath, fd.cFileName);
@@ -239,6 +267,12 @@ int cmp_size(const void *a, const void *b) {
 int cmp_crc(const void *a, const void *b) {
     FileInfo *fa = *(FileInfo**)a;
     FileInfo *fb = *(FileInfo**)b;
+    
+    // Sort errors to the end and ensure they don't match each other
+    if (fa->error && !fb->error) return 1;
+    if (!fa->error && fb->error) return -1;
+    if (fa->error && fb->error) return (fa > fb) ? 1 : -1;
+
     if (fa->crc < fb->crc) return -1;
     if (fa->crc > fb->crc) return 1;
     return 0;
@@ -247,6 +281,12 @@ int cmp_crc(const void *a, const void *b) {
 int cmp_md5(const void *a, const void *b) {
     FileInfo *fa = *(FileInfo**)a;
     FileInfo *fb = *(FileInfo**)b;
+
+    // Sort errors to the end and ensure they don't match each other
+    if (fa->error && !fb->error) return 1;
+    if (!fa->error && fb->error) return -1;
+    if (fa->error && fb->error) return (fa > fb) ? 1 : -1;
+
     return memcmp(fa->md5, fb->md5, 16);
 }
 
@@ -322,7 +362,9 @@ int wmain(int argc, wchar_t **argv) {
             for (size_t k = i; k < j; k++) {
                 // PASS GLOBAL INDEX (k+1) TO PROGRESS
                 print_progress(k + 1, list.count, L"CRC", list.files[k]->path);
-                list.files[k]->crc = get_file_crc(list.files[k]->path);
+                if (!get_file_crc(list.files[k]->path, &list.files[k]->crc)) {
+                    list.files[k]->error = 1;
+                }
             }
 
             qsort(&list.files[i], j - i, sizeof(FileInfo*), cmp_crc);
@@ -336,7 +378,9 @@ int wmain(int argc, wchar_t **argv) {
                     // Processing CRC Group
                     for (size_t k = p; k < q; k++) {
                         print_progress(k + 1, list.count, L"MD5", list.files[k]->path);
-                        get_file_md5(list.files[k]->path, list.files[k]->md5);
+                        if (!get_file_md5(list.files[k]->path, list.files[k]->md5)) {
+                            list.files[k]->error = 1;
+                        }
                     }
 
                     qsort(&list.files[p], q - p, sizeof(FileInfo*), cmp_md5);
