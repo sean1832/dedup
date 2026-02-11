@@ -11,7 +11,7 @@
 
 #define PATH_BUF_SIZE 8192
 #define FILE_BUF_SIZE (64 * 1024)
-#define VERSION "0.0.1"
+#define VERSION "0.0.2"
 
 // --- Data Structures ---
 typedef struct {
@@ -28,6 +28,24 @@ typedef struct {
     size_t count;
     size_t capacity;
 } FileList;
+
+// --- Helper: Progress Display ---
+// prints: [Stage] 10/500 (2.0%) C:\path\to\file.txt      <-- spaces to clear leftovers
+void print_progress(size_t current, size_t total, const char *stage, const char *path) {
+    double percent = (double)current / total * 100.0;
+
+    // \r moves cursor to start of line
+    // We print the info, then 40 spaces to overwrite any previous long text
+    // We rely on the user's terminal being wide enough to not wrap often
+    printf("\r[%s] %zu/%zu (%.1f%%) %s                                        ",
+           stage, current, total, percent, path);
+    fflush(stdout); // Force update immediately
+}
+
+void clear_progress_line() {
+    // Overwrite the entire line with spaces, then return to start
+    printf("\r                                                                                \r");
+}
 
 // --- CRC32 Implementation ---
 unsigned long crc_table[256];
@@ -189,8 +207,10 @@ int main(int argc, char **argv) {
         while (j < list.count && list.files[j]->size == list.files[i]->size) j++;
 
         if (j - i > 1) {
+            // Processing Size Group
             for (size_t k = i; k < j; k++) {
-                printf("\r[CRC] %s", list.files[k]->path);
+                // PASS GLOBAL INDEX (k+1) TO PROGRESS
+                print_progress(k + 1, list.count, "CRC", list.files[k]->path);
                 list.files[k]->crc = get_file_crc(list.files[k]->path);
             }
 
@@ -202,8 +222,9 @@ int main(int argc, char **argv) {
                 while (q < j && list.files[q]->crc == list.files[p]->crc) q++;
 
                 if (q - p > 1) {
+                    // Processing CRC Group
                     for (size_t k = p; k < q; k++) {
-                        printf("\r[MD5] %s", list.files[k]->path);
+                        print_progress(k + 1, list.count, "MD5", list.files[k]->path);
                         get_file_md5(list.files[k]->path, list.files[k]->md5);
                     }
 
@@ -215,7 +236,10 @@ int main(int argc, char **argv) {
                         while (y < q && memcmp(list.files[y]->md5, list.files[x]->md5, 16) == 0) y++;
 
                         if (y - x > 1) {
-                            printf("\nMATCH:\n");
+                            // Clear status line before printing matches to avoid mess
+                            clear_progress_line();
+
+                            printf("MATCH:\n");
                             for (size_t k = x; k < y; k++) {
                                 printf("   %s\n", list.files[k]->path);
                             }
@@ -229,6 +253,8 @@ int main(int argc, char **argv) {
         }
         i = j;
     }
-    printf("\nDone.\n");
+
+    clear_progress_line();
+    printf("Done.\n");
     return 0;
 }
