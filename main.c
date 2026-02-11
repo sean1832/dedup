@@ -11,6 +11,7 @@
 
 #define PATH_BUF_SIZE 8192
 #define FILE_BUF_SIZE (64 * 1024)
+#define VERSION "0.0.1"
 
 // --- Data Structures ---
 typedef struct {
@@ -170,6 +171,7 @@ int cmp_md5(const void *a, const void *b) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
+        printf("dedup %s\n", VERSION);
         printf("Usage: dedup <directory>\n");
         return 1;
     }
