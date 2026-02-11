@@ -1,0 +1,27 @@
+# Compiler settings
+CC = cl
+# /O2 = Maximize Speed, /W3 = Warning Level 3, /nologo = Suppress startup banner
+CFLAGS = /O2 /W3 /nologo
+
+# Define output directory and target with backslashes
+OUT_DIR = bin
+TARGET = $(OUT_DIR)\dedup.exe
+SRC = main.c
+
+# default rule
+all: $(TARGET)
+
+# build rule
+$(TARGET): $(SRC)
+	@echo [SETUP] Creating output directory...
+	@if not exist $(OUT_DIR) mkdir $(OUT_DIR)
+	@echo [BUILD] Compiling...
+	# /Fe sets the executable output path
+	# /Fo sets the object file output path (must end in backslash)
+	$(CC) $(CFLAGS) $(SRC) /Fe$(TARGET) /Fo$(OUT_DIR)\
+
+# clean rule
+clean:
+	@if exist $(OUT_DIR) rd /s /q $(OUT_DIR)
+	@if exist *.obj del *.obj
+	@echo Cleaned up.
