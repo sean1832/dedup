@@ -5,7 +5,8 @@ CC = cl
 # /DNDEBUG: Disable debug code
 # /W3: Warning Level 3
 # /nologo: Suppress banner
-CFLAGS = /O2 /GL /DNDEBUG /W3 /nologo
+# /utf-8: Use UTF-8 encoding for source files
+CFLAGS = /O2 /GL /DNDEBUG /W3 /nologo /utf-8
 
 # Define output directory and target with backslashes
 OUT_DIR = bin
@@ -22,7 +23,8 @@ $(TARGET): $(SRC)
 	@echo [BUILD] Compiling...
 	# /Fe sets the executable output path
 	# /Fo sets the object file output path (must end in backslash)
-	$(CC) $(CFLAGS) $(SRC) /Fe$(TARGET) /Fo$(OUT_DIR)\
+	# /link /SUBSYSTEM:CONSOLE: Explicitly tells linker this is a CLI app
+	$(CC) $(CFLAGS) $(SRC) /Fe$(TARGET) /Fo$(OUT_DIR)\ /link /SUBSYSTEM:CONSOLE
 
 # clean rule
 clean:

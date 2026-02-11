@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include <wchar.h>
 #include <windows.h>
 #include <wincrypt.h>
 #include <stdio.h>
@@ -12,16 +13,14 @@
 
 #define PATH_BUF_SIZE 8192
 #define FILE_BUF_SIZE (64 * 1024)
-#define VERSION "0.0.2"
+#define VERSION L"0.0.3"
 
 // --- Data Structures ---
 typedef struct {
-    char *path;
+    wchar_t *path;
     unsigned __int64 size;
     unsigned long crc;
     BYTE md5[16];
-    int crc_calculated;
-    int md5_calculated;
 } FileInfo;
 
 typedef struct {
@@ -43,27 +42,36 @@ typedef struct {
 
 // --- Helper: Progress Display ---
 // prints: [Stage] 10/500 (2.0%) C:\path\to\file.txt      <-- spaces to clear leftovers
-void print_progress(size_t current, size_t total, const char *stage, const char *path) {
+void print_progress(size_t current, size_t total, const wchar_t *stage, const wchar_t *path) {
     double percent = (double)current / total * 100.0;
 
-    // \r moves cursor to start of line
-    // print the info, then 40 spaces to overwrite any previous long text
-    // rely on the user's terminal being wide enough to not wrap often
-    printf("\r[%s] %zu/%zu (%.1f%%) %s                                        ",
-           stage, current, total, percent, path);
+    // %ls for wide strings in wprintf/printf
+    wprintf(L"\r[%ls] %zu/%zu (%.1f%%) %ls", stage, current, total, percent, path);
+    // Add padding to clear long previous paths
+    wprintf(L"                                        ");
+    // Move cursor back for the next update
+    wprintf(L"\r[%ls] %zu/%zu (%.1f%%) %ls", stage, current, total, percent, path);
     fflush(stdout); // Force update immediately
 }
 
 void clear_progress_line() {
     // Overwrite the entire line with spaces, then return to start
-    printf("\r                                                                                \r");
+    wprintf(L"\r                                                                                \r");
+    fflush(stdout);
 }
 
 // --- JSON helper ---
-void json_escape_print(FILE *stream, const char *str) {
+void json_escape_print(FILE *stream, const wchar_t *str) {
+    // convert wide string to UTF-8 for JSON output
+    int utf8_len = WideCharToMultiByte(CP_UTF8, 0, str, -1, NULL, 0, NULL, NULL);
+    char *utf8_str = malloc(utf8_len);
+    if (!utf8_str) return; // handle malloc failure
+    WideCharToMultiByte(CP_UTF8, 0, str, -1, utf8_str, utf8_len, NULL, NULL);
+
     fputc('"', stream);
-    while (*str) {
-        switch (*str) {
+    char *ptr = utf8_str;
+    while (*ptr) {
+        switch (*ptr) {
             case '\\': fprintf(stream, "\\\\"); break;
             case '"': fprintf(stream, "\\\""); break;
             case '\b': fprintf(stream, "\\b"); break;
@@ -72,22 +80,23 @@ void json_escape_print(FILE *stream, const char *str) {
             case '\r': fprintf(stream, "\\r"); break;
             case '\t': fprintf(stream, "\\t"); break;
             default:
-                if ((unsigned char)*str < 32) fprintf(stream, "\\u%04x", *str);
-                else fputc(*str, stream);
+                if ((unsigned char)*ptr < 32) fprintf(stream, "\\u%04x", *ptr);
+                else fputc(*ptr, stream);
         }
-        str++;
+        ptr++;
     }
     fputc('"', stream);
+    free(utf8_str);
 }
 
 // --- Output helper ---
 void report_duplicates(OutputContext *ctx, FileInfo **group, size_t count) {
     if (ctx->format == FORMAT_TEXT) {
-        fprintf(ctx->stream, "MATCH:\n");
+        fwprintf(ctx->stream, L"MATCH:\n");
         for (size_t i = 0; i < count; i++) {
-            fprintf(ctx->stream, "   %s\n", group[i]->path);
+            fwprintf(ctx->stream, L"   %ls\n", group[i]->path);
         }
-        fprintf(ctx->stream, "----------------------------------------\n");
+        fwprintf(ctx->stream, L"----------------------------------------\n");
     }
     else if (ctx->format == FORMAT_JSON) {
         if (!ctx->first_json_entry) {
@@ -132,10 +141,10 @@ unsigned long update_crc32(unsigned long crc, const BYTE *buf, size_t len) {
 }
 
 // --- Hashing Wrappers ---
-unsigned long get_file_crc(const char *path) {
-    FILE *f = fopen(path, "rb");
+unsigned long get_file_crc(const wchar_t *path) {
+    FILE *f = _wfopen(path, L"rb");
     if (!f) return 0;
-
+    if (!crc_initialized) init_crc32();
     unsigned char buffer[FILE_BUF_SIZE];
     unsigned long crc = 0;
     size_t n;
@@ -147,7 +156,7 @@ unsigned long get_file_crc(const char *path) {
     return crc;
 }
 
-int get_file_md5(const char *path, BYTE *output) {
+int get_file_md5(const wchar_t *path, BYTE *output) {
     HCRYPTPROV hProv = 0;
     HCRYPTHASH hHash = 0;
     FILE *f = 0;
@@ -156,7 +165,7 @@ int get_file_md5(const char *path, BYTE *output) {
     if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) return 0;
     if (!CryptCreateHash(hProv, CALG_MD5, 0, 0, &hHash)) goto cleanup;
 
-    f = fopen(path, "rb");
+    f = _wfopen(path, L"rb");
     if (!f) goto cleanup;
 
     unsigned char buffer[FILE_BUF_SIZE];
@@ -178,35 +187,33 @@ cleanup:
 
 // --- List Management ---
 
-void list_add(FileList *list, char *path, unsigned __int64 size) {
+void list_add(FileList *list, wchar_t *path, unsigned __int64 size) {
     if (list->count == list->capacity) {
         list->capacity = (list->capacity == 0) ? 1024 : list->capacity * 2;
         list->files = realloc(list->files, list->capacity * sizeof(FileInfo*));
     }
     FileInfo *fi = malloc(sizeof(FileInfo));
-    fi->path = _strdup(path);
+    fi->path = _wcsdup(path);
     fi->size = size;
-    fi->crc_calculated = 0;
-    fi->md5_calculated = 0;
     list->files[list->count++] = fi;
 }
 
 // --- Directory Scanning ---
 
-void scan_dir(const char *basePath, FileList *list) {
-    char searchPath[PATH_BUF_SIZE];
-    snprintf(searchPath, PATH_BUF_SIZE, "%s\\*", basePath);
+void scan_dir(const wchar_t *basePath, FileList *list) {
+    wchar_t searchPath[PATH_BUF_SIZE];
+    swprintf(searchPath, PATH_BUF_SIZE, L"%ls\\*", basePath);
 
-    WIN32_FIND_DATA fd;
-    HANDLE hFind = FindFirstFile(searchPath, &fd);
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(searchPath, &fd);
 
     if (hFind == INVALID_HANDLE_VALUE) return;
 
     do {
-        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
 
-        char fullPath[PATH_BUF_SIZE];
-        snprintf(fullPath, PATH_BUF_SIZE, "%s\\%s", basePath, fd.cFileName);
+        wchar_t fullPath[PATH_BUF_SIZE];
+        swprintf(fullPath, PATH_BUF_SIZE, L"%ls\\%ls", basePath, fd.cFileName);
 
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             scan_dir(fullPath, list);
@@ -214,7 +221,7 @@ void scan_dir(const char *basePath, FileList *list) {
             unsigned __int64 fileSize = ((unsigned __int64)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
             list_add(list, fullPath, fileSize);
         }
-    } while (FindNextFile(hFind, &fd));
+    } while (FindNextFileW(hFind, &fd));
 
     FindClose(hFind);
 }
@@ -245,33 +252,33 @@ int cmp_md5(const void *a, const void *b) {
 
 // --- Main ---
 
-int main(int argc, char **argv) {
+int wmain(int argc, wchar_t **argv) {
     if (argc < 2) {
-        printf("dedup %s\n", VERSION);
-        printf("Usage: dedup <directory> [-o <output_file>]\n");
+        wprintf(L"dedup %s\n", VERSION);
+        wprintf(L"Usage: dedup <directory> [-o <output_file>]\n");
         return 1;
     }
-    char *dir_path = NULL;
-    char *out_path = NULL;
+    wchar_t *dir_path = NULL;
+    wchar_t *out_path = NULL;
 
     // arg parsing
     for (int i = 1; i < argc; i++) {
-        if ((strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0)) {
+        if ((wcscmp(argv[i], L"-o") == 0 || wcscmp(argv[i], L"--output") == 0)) {
             if (i + 1 < argc) {
                 out_path = argv[++i];
             } else {
-                fprintf(stderr, "Error: --output requires a filename.\n");
+                fwprintf(stderr, L"Error: --output requires a filename.\n");
                 return 1;
             }
         } else if (argv[i][0] == '-') {
-                fprintf(stderr, "Unknown option: %s\n", argv[i]);
+                fwprintf(stderr, L"Unknown option: %s\n", argv[i]);
                 return 1;
         } else {
             dir_path = argv[i];
         }
     }
     if (!dir_path) {
-        printf("Directory path is required.\n");
+        wprintf(L"Directory path is required.\n");
         return 1;
     }
 
@@ -281,24 +288,24 @@ int main(int argc, char **argv) {
     out_ctx.format = FORMAT_TEXT;
     out_ctx.first_json_entry = 1;
     if (out_path) {
-        out_ctx.stream = fopen(out_path, "w");
+        out_ctx.stream = _wfopen(out_path, L"wb");
         if (!out_ctx.stream) {
             perror("Error opening output file");
             return 1;
         }
 
         // detect JSON extension
-        char *ext = strrchr(out_path, '.');
-        if (ext && _stricmp(ext, ".json") == 0) { // _stricmp for case-insensitive comparison (Windows)
+        wchar_t *ext = wcsrchr(out_path, '.');
+        if (ext && _wcsicmp(ext, L".json") == 0) { // _wcsicmp for case-insensitive comparison (Windows)
             out_ctx.format = FORMAT_JSON;
         }
     }
 
     FileList list = {0};
-    printf("Scanning %s...\n", dir_path);
+    wprintf(L"Scanning %ls...\n", dir_path);
     scan_dir(dir_path, &list);
 
-    printf("Found %zu files. Sorting by size...\n", list.count);
+    wprintf(L"Found %zu files. Sorting by size...\n", list.count);
     qsort(list.files, list.count, sizeof(FileInfo*), cmp_size);
 
     if (out_ctx.format == FORMAT_JSON) {
@@ -314,7 +321,7 @@ int main(int argc, char **argv) {
             // Processing Size Group
             for (size_t k = i; k < j; k++) {
                 // PASS GLOBAL INDEX (k+1) TO PROGRESS
-                print_progress(k + 1, list.count, "CRC", list.files[k]->path);
+                print_progress(k + 1, list.count, L"CRC", list.files[k]->path);
                 list.files[k]->crc = get_file_crc(list.files[k]->path);
             }
 
@@ -328,7 +335,7 @@ int main(int argc, char **argv) {
                 if (q - p > 1) {
                     // Processing CRC Group
                     for (size_t k = p; k < q; k++) {
-                        print_progress(k + 1, list.count, "MD5", list.files[k]->path);
+                        print_progress(k + 1, list.count, L"MD5", list.files[k]->path);
                         get_file_md5(list.files[k]->path, list.files[k]->md5);
                     }
 
@@ -346,7 +353,7 @@ int main(int argc, char **argv) {
                             report_duplicates(&out_ctx, &list.files[x], y - x);
 
                             if (out_path) {
-                                printf("\rFound match group... (logged to file)    ");
+                                wprintf(L"\rFound match group... (logged to file)    ");
                                 fflush(stdout);
                             }
                         }
@@ -364,9 +371,9 @@ int main(int argc, char **argv) {
     }
 
     clear_progress_line();
-    printf("Done.\n");
+    wprintf(L"Done.\n");
     if (out_path) {
-        printf("Output written to %s", out_path);
+        wprintf(L"Output written to %ls", out_path);
         fclose(out_ctx.stream);
     }
 

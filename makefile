@@ -7,7 +7,7 @@ CC = gcc
 # -s: Strip debug symbols (Smallest binary)
 # -flto: Link Time Optimization (Faster code layout)
 # -DNDEBUG: Disable debug macros
-CFLAGS = -O3 -s -flto -DNDEBUG -Wall
+CFLAGS = -O3 -s -flto -DNDEBUG -Wall -municode
 LIBS = -ladvapi32
 
 # Separate directory and target for cleaner logic

@@ -39,7 +39,7 @@ make
 or build with command line:
 
 ```sh
-gcc -O3 -s -flto -DNDEBUG -Wall -o dedup.exe main.c -ladvapi32
+gcc -O3 -s -flto -DNDEBUG -Wall -municode -o dedup.exe main.c -ladvapi32
 ```
 
 ### Visual Studio (MSVC)
