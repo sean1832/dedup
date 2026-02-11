@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <windows.h>
 #include <wincrypt.h>
 #include <stdio.h>
@@ -29,14 +30,25 @@ typedef struct {
     size_t capacity;
 } FileList;
 
+typedef enum {
+    FORMAT_TEXT,
+    FORMAT_JSON
+} OutputFormat;
+
+typedef struct {
+    FILE *stream;
+    OutputFormat format;
+    int first_json_entry; // To handle JSON commas correctly
+} OutputContext;
+
 // --- Helper: Progress Display ---
 // prints: [Stage] 10/500 (2.0%) C:\path\to\file.txt      <-- spaces to clear leftovers
 void print_progress(size_t current, size_t total, const char *stage, const char *path) {
     double percent = (double)current / total * 100.0;
 
     // \r moves cursor to start of line
-    // We print the info, then 40 spaces to overwrite any previous long text
-    // We rely on the user's terminal being wide enough to not wrap often
+    // print the info, then 40 spaces to overwrite any previous long text
+    // rely on the user's terminal being wide enough to not wrap often
     printf("\r[%s] %zu/%zu (%.1f%%) %s                                        ",
            stage, current, total, percent, path);
     fflush(stdout); // Force update immediately
@@ -45,6 +57,53 @@ void print_progress(size_t current, size_t total, const char *stage, const char 
 void clear_progress_line() {
     // Overwrite the entire line with spaces, then return to start
     printf("\r                                                                                \r");
+}
+
+// --- JSON helper ---
+void json_escape_print(FILE *stream, const char *str) {
+    fputc('"', stream);
+    while (*str) {
+        switch (*str) {
+            case '\\': fprintf(stream, "\\\\"); break;
+            case '"': fprintf(stream, "\\\""); break;
+            case '\b': fprintf(stream, "\\b"); break;
+            case '\f': fprintf(stream, "\\f"); break;
+            case '\n': fprintf(stream, "\\n"); break;
+            case '\r': fprintf(stream, "\\r"); break;
+            case '\t': fprintf(stream, "\\t"); break;
+            default:
+                if ((unsigned char)*str < 32) fprintf(stream, "\\u%04x", *str);
+                else fputc(*str, stream);
+        }
+        str++;
+    }
+    fputc('"', stream);
+}
+
+// --- Output helper ---
+void report_duplicates(OutputContext *ctx, FileInfo **group, size_t count) {
+    if (ctx->format == FORMAT_TEXT) {
+        fprintf(ctx->stream, "MATCH:\n");
+        for (size_t i = 0; i < count; i++) {
+            fprintf(ctx->stream, "   %s\n", group[i]->path);
+        }
+        fprintf(ctx->stream, "----------------------------------------\n");
+    }
+    else if (ctx->format == FORMAT_JSON) {
+        if (!ctx->first_json_entry) {
+            fprintf(ctx->stream, ",\n");
+        }
+        ctx->first_json_entry = 0;
+
+        fprintf(ctx->stream, "  [\n");
+        for (size_t i = 0; i < count; i++) {
+            fprintf(ctx->stream, "    ");
+            json_escape_print(ctx->stream, group[i]->path);
+            if (i < count - 1) fprintf(ctx->stream, ",");
+            fprintf(ctx->stream, "\n");
+        }
+        fprintf(ctx->stream, "  ]");
+    }
 }
 
 // --- CRC32 Implementation ---
@@ -73,7 +132,6 @@ unsigned long update_crc32(unsigned long crc, const BYTE *buf, size_t len) {
 }
 
 // --- Hashing Wrappers ---
-
 unsigned long get_file_crc(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
@@ -190,16 +248,62 @@ int cmp_md5(const void *a, const void *b) {
 int main(int argc, char **argv) {
     if (argc < 2) {
         printf("dedup %s\n", VERSION);
-        printf("Usage: dedup <directory>\n");
+        printf("Usage: dedup <directory> [-o <output_file>]\n");
+        return 1;
+    }
+    char *dir_path = NULL;
+    char *out_path = NULL;
+
+    // arg parsing
+    for (int i = 1; i < argc; i++) {
+        if ((strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0)) {
+            if (i + 1 < argc) {
+                out_path = argv[++i];
+            } else {
+                fprintf(stderr, "Error: --output requires a filename.\n");
+                return 1;
+            }
+        } else if (argv[i][0] == '-') {
+                fprintf(stderr, "Unknown option: %s\n", argv[i]);
+                return 1;
+        } else {
+            dir_path = argv[i];
+        }
+    }
+    if (!dir_path) {
+        printf("Directory path is required.\n");
         return 1;
     }
 
+    // setup output context
+    OutputContext out_ctx = {0};
+    out_ctx.stream = stdout;
+    out_ctx.format = FORMAT_TEXT;
+    out_ctx.first_json_entry = 1;
+    if (out_path) {
+        out_ctx.stream = fopen(out_path, "w");
+        if (!out_ctx.stream) {
+            perror("Error opening output file");
+            return 1;
+        }
+
+        // detect JSON extension
+        char *ext = strrchr(out_path, '.');
+        if (ext && _stricmp(ext, ".json") == 0) { // _stricmp for case-insensitive comparison (Windows)
+            out_ctx.format = FORMAT_JSON;
+        }
+    }
+
     FileList list = {0};
-    printf("Scanning %s...\n", argv[1]);
-    scan_dir(argv[1], &list);
+    printf("Scanning %s...\n", dir_path);
+    scan_dir(dir_path, &list);
 
     printf("Found %zu files. Sorting by size...\n", list.count);
     qsort(list.files, list.count, sizeof(FileInfo*), cmp_size);
+
+    if (out_ctx.format == FORMAT_JSON) {
+        fprintf(out_ctx.stream, "[\n");
+    }
 
     size_t i = 0;
     while (i < list.count) {
@@ -236,14 +340,15 @@ int main(int argc, char **argv) {
                         while (y < q && memcmp(list.files[y]->md5, list.files[x]->md5, 16) == 0) y++;
 
                         if (y - x > 1) {
-                            // Clear status line before printing matches to avoid mess
+                            // Match Found
                             clear_progress_line();
 
-                            printf("MATCH:\n");
-                            for (size_t k = x; k < y; k++) {
-                                printf("   %s\n", list.files[k]->path);
+                            report_duplicates(&out_ctx, &list.files[x], y - x);
+
+                            if (out_path) {
+                                printf("\rFound match group... (logged to file)    ");
+                                fflush(stdout);
                             }
-                            printf("----------------------------------------\n");
                         }
                         x = y;
                     }
@@ -254,7 +359,23 @@ int main(int argc, char **argv) {
         i = j;
     }
 
+    if (out_ctx.format == FORMAT_JSON) {
+        fprintf(out_ctx.stream, "\n]\n");
+    }
+
     clear_progress_line();
     printf("Done.\n");
+    if (out_path) {
+        printf("Output written to %s", out_path);
+        fclose(out_ctx.stream);
+    }
+
+    // cleanup memory
+    for (size_t i=0; i<list.count; i++) {
+        free(list.files[i]->path);
+        free(list.files[i]);
+    }
+    free(list.files);
+
     return 0;
 }

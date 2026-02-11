@@ -9,7 +9,7 @@ A high-performance CLI tool for identifying duplicate files within a directory t
 ## Usage
 
 ```sh
-dedup.exe <directory>
+dedup.exe <directory> [-o <output_file>]
 ```
 
 **Example Output:**
