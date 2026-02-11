@@ -36,10 +36,22 @@ Run the standard makefile:
 make
 ```
 
+or build with command line:
+
+```sh
+gcc -O3 -s -flto -DNDEBUG -Wall -o dedup.exe main.c -ladvapi32
+```
+
 ### Visual Studio (MSVC)
 
 Run the NMAKE file from the Developer Command Prompt:
 
 ```sh
 nmake -f Makefile.nmake
+```
+
+or build with command line:
+
+```sh
+cl /O2 /GL /DNDEBUG /W3 /nologo main.c /Fe:dedup.exe
 ```

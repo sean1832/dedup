@@ -3,7 +3,11 @@ MINGW_BIN = C:\msys64\mingw64\bin
 
 # standard settings
 CC = gcc
-CFLAGS = -O3 -Wall
+# -O3: Max speed
+# -s: Strip debug symbols (Smallest binary)
+# -flto: Link Time Optimization (Faster code layout)
+# -DNDEBUG: Disable debug macros
+CFLAGS = -O3 -s -flto -DNDEBUG -Wall
 LIBS = -ladvapi32
 
 # Separate directory and target for cleaner logic

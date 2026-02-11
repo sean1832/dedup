@@ -1,7 +1,11 @@
 # Compiler settings
 CC = cl
-# /O2 = Maximize Speed, /W3 = Warning Level 3, /nologo = Suppress startup banner
-CFLAGS = /O2 /W3 /nologo
+# /O2: Maximize Speed
+# /GL: Whole Program Optimization
+# /DNDEBUG: Disable debug code
+# /W3: Warning Level 3
+# /nologo: Suppress banner
+CFLAGS = /O2 /GL /DNDEBUG /W3 /nologo
 
 # Define output directory and target with backslashes
 OUT_DIR = bin
