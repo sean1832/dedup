@@ -19,8 +19,7 @@
 typedef struct {
     wchar_t *path;
     unsigned __int64 size;
-    unsigned long crc;
-    BYTE md5[16];
+    BYTE md5[16]; // store partial MD5 first, then overwrite with full if needed
     int error;
 } FileInfo;
 
@@ -138,50 +137,10 @@ void report_duplicates(OutputContext *ctx, FileInfo **group, size_t count) {
     }
 }
 
-// --- CRC32 Implementation ---
-unsigned long crc_table[256];
-int crc_initialized = 0;
-
-void init_crc32() {
-    unsigned long crc;
-    for (int i = 0; i < 256; i++) {
-        crc = i;
-        for (int j = 0; j < 8; j++) {
-            crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320 : crc >> 1;
-        }
-        crc_table[i] = crc;
-    }
-    crc_initialized = 1;
-}
-
-unsigned long update_crc32(unsigned long crc, const BYTE *buf, size_t len) {
-    if (!crc_initialized) init_crc32();
-    crc = ~crc;
-    for (size_t i = 0; i < len; i++) {
-        crc = (crc >> 8) ^ crc_table[(crc & 0xFF) ^ buf[i]];
-    }
-    return ~crc;
-}
-
 // --- Hashing Wrappers ---
-// --- Hashing Wrappers ---
-int get_file_crc(const wchar_t *path, unsigned long *out_crc) {
-    FILE *f = _wfopen(path, L"rb");
-    if (!f) return 0;
-    if (!crc_initialized) init_crc32();
-    unsigned char buffer[FILE_BUF_SIZE];
-    unsigned long crc = 0;
-    size_t n;
 
-    while ((n = fread(buffer, 1, FILE_BUF_SIZE, f)) > 0) {
-        crc = update_crc32(crc, buffer, n);
-    }
-    fclose(f);
-    *out_crc = crc;
-    return 1;
-}
-
-int get_file_md5(const wchar_t *path, BYTE *output) {
+// Compute MD5 hash of a file. If first_n_bytes > 0, only hash that many bytes (for partial hashing).
+int get_file_md5(const wchar_t *path, BYTE *output, unsigned long long first_n_bytes) {
     HCRYPTPROV hProv = 0;
     HCRYPTHASH hHash = 0;
     FILE *f = 0;
@@ -195,8 +154,17 @@ int get_file_md5(const wchar_t *path, BYTE *output) {
 
     unsigned char buffer[FILE_BUF_SIZE];
     size_t n;
-    while ((n = fread(buffer, 1, FILE_BUF_SIZE, f)) > 0) {
-        if (!CryptHashData(hHash, buffer, (DWORD)n, 0)) goto cleanup;
+    if (first_n_bytes > 0) {
+        // Partial read
+        n = fread(buffer, 1, first_n_bytes, f);
+        if (n > 0) {
+            if (!CryptHashData(hHash, buffer, (DWORD)n, 0)) goto cleanup;
+        }
+    } else {
+        // Full read
+        while ((n = fread(buffer, 1, FILE_BUF_SIZE, f)) > 0) {
+            if (!CryptHashData(hHash, buffer, (DWORD)n, 0)) goto cleanup;
+        }
     }
 
     DWORD hashLen = 16;
@@ -236,7 +204,7 @@ void scan_dir(const wchar_t *basePath, FileList *list) {
 
     do {
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
-        
+
         // Skip reparse points (symlinks/junctions) to avoid infinite loops
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
 
@@ -261,20 +229,6 @@ int cmp_size(const void *a, const void *b) {
     FileInfo *fb = *(FileInfo**)b;
     if (fa->size < fb->size) return -1;
     if (fa->size > fb->size) return 1;
-    return 0;
-}
-
-int cmp_crc(const void *a, const void *b) {
-    FileInfo *fa = *(FileInfo**)a;
-    FileInfo *fb = *(FileInfo**)b;
-    
-    // Sort errors to the end and ensure they don't match each other
-    if (fa->error && !fb->error) return 1;
-    if (!fa->error && fb->error) return -1;
-    if (fa->error && fb->error) return (fa > fb) ? 1 : -1;
-
-    if (fa->crc < fb->crc) return -1;
-    if (fa->crc > fb->crc) return 1;
     return 0;
 }
 
@@ -352,39 +306,48 @@ int wmain(int argc, wchar_t **argv) {
         fprintf(out_ctx.stream, "[\n");
     }
 
+    // --- Main Processing Loop ---
+    // Pass 1: Group by Size
     size_t i = 0;
     while (i < list.count) {
         size_t j = i + 1;
         while (j < list.count && list.files[j]->size == list.files[i]->size) j++;
 
+        // if file size group has more than 1 file, process further
         if (j - i > 1) {
-            // Processing Size Group
+            // Pass 2: compute partial MD5 of first 64KB
             for (size_t k = i; k < j; k++) {
-                // PASS GLOBAL INDEX (k+1) TO PROGRESS
-                print_progress(k + 1, list.count, L"CRC", list.files[k]->path);
-                if (!get_file_crc(list.files[k]->path, &list.files[k]->crc)) {
-                    list.files[k]->error = 1;
+                print_progress(k + 1, list.count, L"Pre-Scan", list.files[k]->path);
+                if (!get_file_md5(list.files[k]->path, list.files[k]->md5, FILE_BUF_SIZE)) { // first 64KB
+                    list.files[k]->error = 1; // mark error, will be sorted to end and not match anything
                 }
             }
 
-            qsort(&list.files[i], j - i, sizeof(FileInfo*), cmp_crc);
+            // sort by partial MD5
+            qsort(&list.files[i], j - i, sizeof(FileInfo*), cmp_md5);
 
+            // group by partial MD5
             size_t p = i;
             while (p < j) {
                 size_t q = p + 1;
-                while (q < j && list.files[q]->crc == list.files[p]->crc) q++;
+                while (q<j&&memcmp(list.files[q]->md5, list.files[p]->md5, 16) == 0){
+                    q++; // group with same partial MD5
+                }
 
+                // if group has more than 1 file, compute full MD5 and compare
                 if (q - p > 1) {
-                    // Processing CRC Group
+                    // Pass 3: compute full MD5 for this group
                     for (size_t k = p; k < q; k++) {
-                        print_progress(k + 1, list.count, L"MD5", list.files[k]->path);
-                        if (!get_file_md5(list.files[k]->path, list.files[k]->md5)) {
+                        print_progress(k + 1, list.count, L"Full-Scan", list.files[k]->path);
+                        if (!get_file_md5(list.files[k]->path, list.files[k]->md5, 0)) {
                             list.files[k]->error = 1;
                         }
                     }
 
+                    // sort by full MD5
                     qsort(&list.files[p], q - p, sizeof(FileInfo*), cmp_md5);
 
+                    // group by full MD5 and report matches
                     size_t x = p;
                     while (x < q) {
                         size_t y = x + 1;
@@ -397,7 +360,7 @@ int wmain(int argc, wchar_t **argv) {
                             report_duplicates(&out_ctx, &list.files[x], y - x);
 
                             if (out_path) {
-                                wprintf(L"\rFound match group... (logged to file)    ");
+                                wprintf(L"\rFound match group... (logged)    ");
                                 fflush(stdout);
                             }
                         }
