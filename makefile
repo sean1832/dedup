@@ -8,7 +8,7 @@ CC = gcc
 # -flto: Link Time Optimization (Faster code layout)
 # -DNDEBUG: Disable debug macros
 CFLAGS = -O3 -s -flto -DNDEBUG -Wall -municode -Ivendor
-LIBS = -ladvapi32 -lbcrypt
+LIBS =
 
 # Separate directory and target for cleaner logic
 OUT_DIR = bin
