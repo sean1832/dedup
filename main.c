@@ -6,7 +6,6 @@
 #include <wchar.h>
 #include <windows.h>
 
-
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
 #endif
@@ -18,10 +17,12 @@ typedef LONG NTSTATUS;
 #endif
 
 #include <bcrypt.h>
+#define XXH_INLINE_ALL
+#include "xxhash.h"
 
 #define PATH_BUF_SIZE 8192
 #define FILE_BUF_SIZE (64 * 1024)
-#define VERSION L"0.0.4"
+#define VERSION L"0.0.5"
 
 // --- Data Structures ---
 typedef struct {
@@ -33,46 +34,72 @@ typedef struct {
 
 // --- Modular Hash Interface ---
 
+typedef enum { ALGO_MD5, ALGO_XXH3 } HashAlgo;
+
 typedef struct {
-  BCRYPT_HASH_HANDLE hHash;
-  PBYTE pbHashObject;
-  DWORD cbHashObject;
+  HashAlgo algo;
+  union {
+    struct {
+      BCRYPT_HASH_HANDLE hHash;
+      PBYTE pbHashObject;
+      DWORD cbHashObject;
+    } md5;
+    XXH3_state_t *xxh3;
+  } state;
 } HashContext;
 
 // Initialize hash context. Returns 1 on success, 0 on failure.
-// Takes an open algorithm provider handle.
-int hash_init(HashContext *ctx, BCRYPT_ALG_HANDLE hAlg) {
-  DWORD cbResult = 0;
-  NTSTATUS status;
+// Takes an open algorithm provider handle (ignored for XXH3).
+int hash_init(HashContext *ctx, HashAlgo algo, BCRYPT_ALG_HANDLE hAlg) {
+  ctx->algo = algo;
 
-  // Get the object length
-  status =
-      BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH, (PBYTE)&ctx->cbHashObject,
-                        sizeof(DWORD), &cbResult, 0);
-  if (!NT_SUCCESS(status))
-    return 0;
+  if (algo == ALGO_MD5) {
+    DWORD cbResult = 0;
+    NTSTATUS status;
 
-  // Allocate the hash object on the heap
-  ctx->pbHashObject = (PBYTE)malloc(ctx->cbHashObject);
-  if (NULL == ctx->pbHashObject)
-    return 0;
+    // Get the object length
+    status = BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH,
+                               (PBYTE)&ctx->state.md5.cbHashObject,
+                               sizeof(DWORD), &cbResult, 0);
+    if (!NT_SUCCESS(status))
+      return 0;
 
-  // Create the hash
-  status = BCryptCreateHash(hAlg, &ctx->hHash, ctx->pbHashObject,
-                            ctx->cbHashObject, NULL, 0, 0);
-  if (!NT_SUCCESS(status)) {
-    free(ctx->pbHashObject);
-    ctx->pbHashObject = NULL;
-    return 0;
+    // Allocate the hash object on the heap
+    ctx->state.md5.pbHashObject = (PBYTE)malloc(ctx->state.md5.cbHashObject);
+    if (NULL == ctx->state.md5.pbHashObject)
+      return 0;
+
+    // Create the hash
+    status = BCryptCreateHash(hAlg, &ctx->state.md5.hHash,
+                              ctx->state.md5.pbHashObject,
+                              ctx->state.md5.cbHashObject, NULL, 0, 0);
+    if (!NT_SUCCESS(status)) {
+      free(ctx->state.md5.pbHashObject);
+      ctx->state.md5.pbHashObject = NULL;
+      return 0;
+    }
+  } else if (algo == ALGO_XXH3) {
+    ctx->state.xxh3 = XXH3_createState();
+    if (ctx->state.xxh3 == NULL)
+      return 0;
+    if (XXH3_128bits_reset(ctx->state.xxh3) == XXH_ERROR) {
+      XXH3_freeState(ctx->state.xxh3);
+      return 0;
+    }
   }
-
   return 1;
 }
 
 // Update hash with data. Returns 1 on success, 0 on failure.
 int hash_update(HashContext *ctx, const void *data, size_t len) {
-  if (!NT_SUCCESS(BCryptHashData(ctx->hHash, (PUCHAR)data, (ULONG)len, 0)))
-    return 0;
+  if (ctx->algo == ALGO_MD5) {
+    if (!NT_SUCCESS(
+            BCryptHashData(ctx->state.md5.hHash, (PUCHAR)data, (ULONG)len, 0)))
+      return 0;
+  } else if (ctx->algo == ALGO_XXH3) {
+    if (XXH3_128bits_update(ctx->state.xxh3, data, len) == XXH_ERROR)
+      return 0;
+  }
   return 1;
 }
 
@@ -80,16 +107,24 @@ int hash_update(HashContext *ctx, const void *data, size_t len) {
 // Returns 1 on success, 0 on failure.
 int hash_finalize(HashContext *ctx, BYTE *out) {
   int success = 1;
-  if (!NT_SUCCESS(BCryptFinishHash(ctx->hHash, out, 16, 0)))
-    success = 0;
 
-  // Cleanup
-  if (ctx->hHash)
-    BCryptDestroyHash(ctx->hHash);
-  if (ctx->pbHashObject)
-    free(ctx->pbHashObject);
-  ctx->hHash = NULL;
-  ctx->pbHashObject = NULL;
+  if (ctx->algo == ALGO_MD5) {
+    if (!NT_SUCCESS(BCryptFinishHash(ctx->state.md5.hHash, out, 16, 0)))
+      success = 0;
+
+    // Cleanup
+    if (ctx->state.md5.hHash)
+      BCryptDestroyHash(ctx->state.md5.hHash);
+    if (ctx->state.md5.pbHashObject)
+      free(ctx->state.md5.pbHashObject);
+    ctx->state.md5.hHash = NULL;
+    ctx->state.md5.pbHashObject = NULL;
+  } else if (ctx->algo == ALGO_XXH3) {
+    XXH128_hash_t hash = XXH3_128bits_digest(ctx->state.xxh3);
+    memcpy(out, &hash, 16);
+    XXH3_freeState(ctx->state.xxh3);
+    ctx->state.xxh3 = NULL;
+  }
 
   return success;
 }
@@ -232,14 +267,14 @@ void report_duplicates(OutputContext *ctx, FileInfo **group, size_t count) {
 
 // Compute Hash of a file. If first_n_bytes > 0, only hash that many bytes (for
 // partial hashing).
-int get_file_hash(BCRYPT_ALG_HANDLE hAlg, const wchar_t *path, BYTE *output,
-                  unsigned long long first_n_bytes) {
+int get_file_hash(HashAlgo algo, BCRYPT_ALG_HANDLE hAlg, const wchar_t *path,
+                  BYTE *output, unsigned long long first_n_bytes) {
   FILE *f = _wfopen(path, L"rb");
   if (!f)
     return 0;
 
   HashContext ctx = {0};
-  if (!hash_init(&ctx, hAlg)) {
+  if (!hash_init(&ctx, algo, hAlg)) {
     fclose(f);
     return 0;
   }
@@ -274,9 +309,13 @@ cleanup:
   // If we failed before finalize, we need to clean up manually?
   // Let's make hash_finalize safe to call twice or ensure we call it once.
   // Actually, distinct cleanup might be cleaner, but for this simple script:
-  if (!success && ctx.hHash) {
-    BCryptDestroyHash(ctx.hHash);
-    free(ctx.pbHashObject);
+  if (!success) {
+    if (ctx.algo == ALGO_MD5 && ctx.state.md5.hHash) {
+      BCryptDestroyHash(ctx.state.md5.hHash);
+      free(ctx.state.md5.pbHashObject);
+    } else if (ctx.algo == ALGO_XXH3 && ctx.state.xxh3) {
+      XXH3_freeState(ctx.state.xxh3);
+    }
   }
 
   fclose(f);
@@ -366,11 +405,13 @@ int wmain(int argc, wchar_t **argv) {
 
   if (argc < 2) {
     wprintf(L"dedup %s\n", VERSION);
-    wprintf(L"Usage: dedup <directory> [-o <output_file>]\n");
+    wprintf(
+        L"Usage: dedup <directory> [-o <output_file>] [--algo <md5|xxh3>]\n");
     return 1;
   }
   wchar_t *dir_path = NULL;
   wchar_t *out_path = NULL;
+  HashAlgo algo = ALGO_XXH3; // Default to XXH3
 
   // arg parsing
   for (int i = 1; i < argc; i++) {
@@ -379,6 +420,23 @@ int wmain(int argc, wchar_t **argv) {
         out_path = argv[++i];
       } else {
         fwprintf(stderr, L"Error: --output requires a filename.\n");
+        return 1;
+      }
+    } else if (wcscmp(argv[i], L"--algo") == 0) {
+      if (i + 1 < argc) {
+        wchar_t *algo_str = argv[++i];
+        if (_wcsicmp(algo_str, L"md5") == 0) {
+          algo = ALGO_MD5;
+        } else if (_wcsicmp(algo_str, L"xxh3") == 0) {
+          algo = ALGO_XXH3;
+        } else {
+          fwprintf(stderr,
+                   L"Error: Unknown algorithm '%ls'. Use 'md5' or 'xxh3'.\n",
+                   algo_str);
+          return 1;
+        }
+      } else {
+        fwprintf(stderr, L"Error: --algo requires an argument.\n");
         return 1;
       }
     } else if (argv[i][0] == '-') {
@@ -421,10 +479,12 @@ int wmain(int argc, wchar_t **argv) {
   qsort(list.files, list.count, sizeof(FileInfo *), cmp_size);
 
   BCRYPT_ALG_HANDLE hProv = 0;
-  if (!NT_SUCCESS(
-          BCryptOpenAlgorithmProvider(&hProv, BCRYPT_MD5_ALGORITHM, NULL, 0))) {
-    fwprintf(stderr, L"Error acquiring crypto context: %d\n", GetLastError());
-    return 1;
+  if (algo == ALGO_MD5) {
+    if (!NT_SUCCESS(BCryptOpenAlgorithmProvider(&hProv, BCRYPT_MD5_ALGORITHM,
+                                                NULL, 0))) {
+      fwprintf(stderr, L"Error acquiring crypto context: %d\n", GetLastError());
+      return 1;
+    }
   }
 
   if (out_ctx.format == FORMAT_JSON) {
@@ -444,8 +504,8 @@ int wmain(int argc, wchar_t **argv) {
       // Pass 2: compute partial Hash of first 64KB
       for (size_t k = i; k < j; k++) {
         print_progress(k + 1, list.count, L"Pre-Scan", list.files[k]->path);
-        if (!get_file_hash(hProv, list.files[k]->path, list.files[k]->hash,
-                           FILE_BUF_SIZE)) { // first 64KB
+        if (!get_file_hash(algo, hProv, list.files[k]->path,
+                           list.files[k]->hash, FILE_BUF_SIZE)) { // first 64KB
           list.files[k]->error =
               1; // mark error, will be sorted to end and not match anything
         }
@@ -476,8 +536,8 @@ int wmain(int argc, wchar_t **argv) {
 
             print_progress(k + 1, list.count, L"Full-Scan",
                            list.files[k]->path);
-            if (!get_file_hash(hProv, list.files[k]->path, list.files[k]->hash,
-                               0)) {
+            if (!get_file_hash(algo, hProv, list.files[k]->path,
+                               list.files[k]->hash, 0)) {
               list.files[k]->error = 1;
             }
           }

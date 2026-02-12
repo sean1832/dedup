@@ -7,13 +7,13 @@ CC = gcc
 # -s: Strip debug symbols (Smallest binary)
 # -flto: Link Time Optimization (Faster code layout)
 # -DNDEBUG: Disable debug macros
-CFLAGS = -O3 -s -flto -DNDEBUG -Wall -municode
+CFLAGS = -O3 -s -flto -DNDEBUG -Wall -municode -Ivendor
 LIBS = -ladvapi32 -lbcrypt
 
 # Separate directory and target for cleaner logic
 OUT_DIR = bin
 TARGET = $(OUT_DIR)/dedup.exe
-SRC = main.c
+SRC = main.c vendor/xxhash.c
 
 all: $(TARGET)
 
