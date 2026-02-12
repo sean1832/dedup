@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <io.h>
 
 #ifdef _MSC_VER
 // Link libraries automatically for MSVC (Visual Studio)
@@ -245,6 +247,9 @@ int cmp_md5(const void *a, const void *b) {
 // --- Main ---
 
 int wmain(int argc, wchar_t **argv) {
+    // swith STDOUT to Unicode Mode
+    _setmode(_fileno(stdout), _O_U16TEXT);
+
     if (argc < 2) {
         wprintf(L"dedup %s\n", VERSION);
         wprintf(L"Usage: dedup <directory> [-o <output_file>]\n");
