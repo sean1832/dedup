@@ -3,8 +3,8 @@
 A high-performance CLI tool for identifying duplicate files within a directory tree. It implements a three-stage filter to minimize I/O and CPU usage:
 
 1. **File Size**: Filters unique file sizes instantly.
-2. **CRC32**: Computes a fast checksum for files with matching sizes.
-3. **MD5**: Performs cryptographic verification only on files with matching sizes and CRC32 checksums.
+2. **Partial MD5**: Perform partial MD5 hash on files with matching sizes.
+3. **Full MD5**: Performs full MD5 hash on files with matching sizes and Partial MD5 checksums.
 
 ## Usage
 
