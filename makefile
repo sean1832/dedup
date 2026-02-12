@@ -8,7 +8,7 @@ CC = gcc
 # -flto: Link Time Optimization (Faster code layout)
 # -DNDEBUG: Disable debug macros
 CFLAGS = -O3 -s -flto -DNDEBUG -Wall -municode
-LIBS = -ladvapi32
+LIBS = -ladvapi32 -lbcrypt
 
 # Separate directory and target for cleaner logic
 OUT_DIR = bin
@@ -27,5 +27,5 @@ $(TARGET): $(SRC)
 
 clean:
 	@if exist $(TARGET) del /Q "$(OUT_DIR)\dedup.exe"
-	@if exist $(OUT_DIR) rmdir $(OUT_DIR)
+	@if exist $(OUT_DIR) rmdir /S /Q $(OUT_DIR)
 	@echo Cleaned up.
