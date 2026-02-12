@@ -13,7 +13,7 @@
 
 #define PATH_BUF_SIZE 8192
 #define FILE_BUF_SIZE (64 * 1024)
-#define VERSION L"0.0.3"
+#define VERSION L"0.0.4"
 
 // --- Data Structures ---
 typedef struct {
@@ -140,31 +140,29 @@ void report_duplicates(OutputContext *ctx, FileInfo **group, size_t count) {
 // --- Hashing Wrappers ---
 
 // Compute MD5 hash of a file. If first_n_bytes > 0, only hash that many bytes (for partial hashing).
-int get_file_md5(const wchar_t *path, BYTE *output, unsigned long long first_n_bytes) {
-    HCRYPTPROV hProv = 0;
+int get_file_md5(HCRYPTPROV hProv, const wchar_t *path, BYTE *output, unsigned long long first_n_bytes) {
     HCRYPTHASH hHash = 0;
     FILE *f = 0;
     int success = 0;
 
-    if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) return 0;
-    if (!CryptCreateHash(hProv, CALG_MD5, 0, 0, &hHash)) goto cleanup;
+    if (!CryptCreateHash(hProv, CALG_MD5, 0, 0, &hHash)) return 0;
 
     f = _wfopen(path, L"rb");
     if (!f) goto cleanup;
 
     unsigned char buffer[FILE_BUF_SIZE];
     size_t n;
-    if (first_n_bytes > 0) {
-        // Partial read
-        n = fread(buffer, 1, first_n_bytes, f);
-        if (n > 0) {
-            if (!CryptHashData(hHash, buffer, (DWORD)n, 0)) goto cleanup;
+    unsigned long long total_read = 0;
+
+    while ((n = fread(buffer, 1, FILE_BUF_SIZE, f)) > 0) {
+        if (first_n_bytes > 0 && total_read + n > first_n_bytes) {
+            n = (size_t)(first_n_bytes - total_read);
         }
-    } else {
-        // Full read
-        while ((n = fread(buffer, 1, FILE_BUF_SIZE, f)) > 0) {
-            if (!CryptHashData(hHash, buffer, (DWORD)n, 0)) goto cleanup;
-        }
+        
+        if (!CryptHashData(hHash, buffer, (DWORD)n, 0)) goto cleanup;
+        total_read += n;
+
+        if (first_n_bytes > 0 && total_read >= first_n_bytes) break;
     }
 
     DWORD hashLen = 16;
@@ -174,7 +172,7 @@ int get_file_md5(const wchar_t *path, BYTE *output, unsigned long long first_n_b
 cleanup:
     if (f) fclose(f);
     if (hHash) CryptDestroyHash(hHash);
-    if (hProv) CryptReleaseContext(hProv, 0);
+    // hProv is managed by caller
     return success;
 }
 
@@ -302,6 +300,12 @@ int wmain(int argc, wchar_t **argv) {
     wprintf(L"Found %zu files. Sorting by size...\n", list.count);
     qsort(list.files, list.count, sizeof(FileInfo*), cmp_size);
 
+    HCRYPTPROV hProv = 0;
+    if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+        fwprintf(stderr, L"Error acquiring crypto context: %d\n", GetLastError());
+        return 1;
+    }
+
     if (out_ctx.format == FORMAT_JSON) {
         fprintf(out_ctx.stream, "[\n");
     }
@@ -318,7 +322,7 @@ int wmain(int argc, wchar_t **argv) {
             // Pass 2: compute partial MD5 of first 64KB
             for (size_t k = i; k < j; k++) {
                 print_progress(k + 1, list.count, L"Pre-Scan", list.files[k]->path);
-                if (!get_file_md5(list.files[k]->path, list.files[k]->md5, FILE_BUF_SIZE)) { // first 64KB
+                if (!get_file_md5(hProv, list.files[k]->path, list.files[k]->md5, FILE_BUF_SIZE)) { // first 64KB
                     list.files[k]->error = 1; // mark error, will be sorted to end and not match anything
                 }
             }
@@ -338,8 +342,13 @@ int wmain(int argc, wchar_t **argv) {
                 if (q - p > 1) {
                     // Pass 3: compute full MD5 for this group
                     for (size_t k = p; k < q; k++) {
+                        if (list.files[k]->error) continue; // skip error files
+
+                        // Optimization: if file is small enough, partial hash IS full hash
+                        if (list.files[k]->size <= FILE_BUF_SIZE) continue;
+
                         print_progress(k + 1, list.count, L"Full-Scan", list.files[k]->path);
-                        if (!get_file_md5(list.files[k]->path, list.files[k]->md5, 0)) {
+                        if (!get_file_md5(hProv, list.files[k]->path, list.files[k]->md5, 0)) {
                             list.files[k]->error = 1;
                         }
                     }
@@ -352,6 +361,12 @@ int wmain(int argc, wchar_t **argv) {
                     while (x < q) {
                         size_t y = x + 1;
                         while (y < q && memcmp(list.files[y]->md5, list.files[x]->md5, 16) == 0) y++;
+                        
+                        // Check if valid group (no errors)
+                        if (list.files[x]->error) {
+                            x = y;
+                            continue;
+                        }
 
                         if (y - x > 1) {
                             // Match Found
@@ -390,6 +405,8 @@ int wmain(int argc, wchar_t **argv) {
         free(list.files[i]);
     }
     free(list.files);
+
+    if (hProv) CryptReleaseContext(hProv, 0);
 
     return 0;
 }
