@@ -21,7 +21,7 @@ typedef LONG NTSTATUS;
 
 #define PATH_BUF_SIZE 8192
 #define FILE_BUF_SIZE (64 * 1024)
-#define VERSION L"0.0.6"
+#define VERSION L"0.0.5"
 
 // --- Data Structures ---
 typedef struct {
@@ -325,7 +325,7 @@ int wmain(int argc, wchar_t **argv) {
   _setmode(_fileno(stdout), _O_U16TEXT);
 
   if (argc < 2) {
-    wprintf(L"dedup %s\n", VERSION);
+    wprintf(L"dedup %ls\n", VERSION);
     wprintf(
         L"Usage: dedup <directory> [-o <output_file>]\n");
     return 1;
