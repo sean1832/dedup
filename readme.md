@@ -55,3 +55,6 @@ or build with command line:
 ```sh
 cl /O2 /GL /DNDEBUG /W3 /nologo main.c /Fe:dedup.exe
 ```
+
+## Thanks
+- [xxhash](https://github.com/Cyan4973/xxHash)
