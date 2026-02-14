@@ -44,7 +44,7 @@ make
 or build with command line:
 
 ```sh
-gcc -O3 -s -flto -DNDEBUG -Wall -municode -Ivendor -o dedup.exe main.c
+gcc -O3 -s -flto -DNDEBUG -Wall -municode -Ivendor -o dedup.exe dedup.c
 ```
 
 ### Visual Studio (MSVC)
@@ -58,7 +58,7 @@ nmake -f Makefile.nmake
 or build with command line:
 
 ```sh
-cl /O2 /GL /DNDEBUG /W3 /nologo /Ivendor main.c /Fe:dedup.exe
+cl /O2 /GL /DNDEBUG /W3 /nologo /Ivendor dedup.c /Fe:dedup.exe
 ```
 
 ## Dependencies

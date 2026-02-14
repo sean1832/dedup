@@ -13,7 +13,7 @@ LIBS =
 # Separate directory and target for cleaner logic
 OUT_DIR = bin
 TARGET = $(OUT_DIR)/dedup.exe
-SRC = main.c vendor/xxhash.c
+SRC = dedup.c vendor/xxhash.c
 
 all: $(TARGET)
 

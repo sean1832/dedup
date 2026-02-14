@@ -44,9 +44,9 @@ jobs:
         shell: powershell
         run: |
           $tag = "${{ github.event.release.tag_name }}"
-          $content = Get-Content main.c
+          $content = Get-Content dedup.c
           $content = $content -replace '#define VERSION L"dev"', "#define VERSION L`"$tag`""
-          Set-Content main.c $content
+          Set-Content dedup.c $content
 
       - name: Compile
         shell: cmd
@@ -59,7 +59,7 @@ jobs:
           :: /Fe: Output file name
           :: /link /LTCG: Link time code generation
           :: /OPT:REF /OPT:ICF: Remove unused functions/data
-          cl.exe /nologo /O2 /GL /DNDEBUG /W3 /utf-8 /MT /Ivendor main.c /Fe:${{ env.APP_NAME }}.exe /link /LTCG /OPT:REF /OPT:ICF /SUBSYSTEM:CONSOLE
+          cl.exe /nologo /O2 /GL /DNDEBUG /W3 /utf-8 /MT /Ivendor dedup.c /Fe:${{ env.APP_NAME }}.exe /link /LTCG /OPT:REF /OPT:ICF /SUBSYSTEM:CONSOLE
 
       - name: Package Artifacts
         id: package

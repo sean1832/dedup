@@ -12,7 +12,7 @@ CFLAGS = /O2 /GL /DNDEBUG /W3 /nologo /utf-8 /Ivendor
 # Define output directory and target with backslashes
 OUT_DIR = bin
 TARGET = $(OUT_DIR)\dedup.exe
-SRC = main.c
+SRC = dedup.c
 
 # default rule
 all: $(TARGET)
