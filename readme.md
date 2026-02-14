@@ -8,8 +8,13 @@ A high-performance CLI tool for identifying duplicate files within a directory t
 
 ## Usage
 
-```sh
-dedup.exe <directory> [-o <output_file>]
+```
+Usage: dedup <directory> [OPTIONS]
+Options:
+  -o, --output <file>   Write output to file (JSON if .json extension)
+  -l, --hardlink        Replace duplicates with hardlinks (destructive!)
+  -s, --silent          Silent mode (skip hardlink confirmation prompt)
+  -h, --help            Show this help message
 ```
 
 **Example Output:**
@@ -39,7 +44,7 @@ make
 or build with command line:
 
 ```sh
-gcc -O3 -s -flto -DNDEBUG -Wall -municode -o dedup.exe main.c
+gcc -O3 -s -flto -DNDEBUG -Wall -municode -Ivendor -o dedup.exe main.c
 ```
 
 ### Visual Studio (MSVC)
@@ -53,7 +58,7 @@ nmake -f Makefile.nmake
 or build with command line:
 
 ```sh
-cl /O2 /GL /DNDEBUG /W3 /nologo main.c /Fe:dedup.exe
+cl /O2 /GL /DNDEBUG /W3 /nologo /Ivendor main.c /Fe:dedup.exe
 ```
 
 ## Dependencies
