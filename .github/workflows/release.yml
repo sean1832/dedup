@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+env:
+  APP_NAME: dedup
+
+jobs:
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            target: amd64
+            name_suffix: win-x64
+          - arch: x86
+            target: x86
+            name_suffix: win-x86
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.target }}
+
+      - name: Set TAG_NAME
+        id: tag
+        shell: bash
+        run: |
+          TAG_NAME="${{ github.event.release.tag_name }}"
+          # Strip 'v' prefix if present for cleaner filenames if desired, or keep it.
+          # We'll just use it as is for consistency with the user's Go example.
+          echo "TAG_NAME=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Update Version in Source
+        shell: powershell
+        run: |
+          $tag = "${{ github.event.release.tag_name }}"
+          $content = Get-Content main.c
+          $content = $content -replace '#define VERSION L"dev"', "#define VERSION L`"$tag`""
+          Set-Content main.c $content
+
+      - name: Compile
+        shell: cmd
+        run: |
+          :: /O2: Max speed
+          :: /GL: Whole program optimization
+          :: /DNDEBUG: Disable assert
+          :: /utf-8: Source is utf-8
+          :: /MT: Static CRT (portability)
+          :: /Fe: Output file name
+          :: /link /LTCG: Link time code generation
+          :: /OPT:REF /OPT:ICF: Remove unused functions/data
+          cl.exe /nologo /O2 /GL /DNDEBUG /W3 /utf-8 /MT /Ivendor main.c /Fe:${{ env.APP_NAME }}.exe /link /LTCG /OPT:REF /OPT:ICF /SUBSYSTEM:CONSOLE
+
+      - name: Package Artifacts
+        id: package
+        shell: powershell
+        run: |
+          $tagName = "${{ steps.tag.outputs.TAG_NAME }}"
+          $arch = "${{ matrix.target }}"
+          $appName = "${{ env.APP_NAME }}"
+          $zipName = "${appName}-${tagName}-windows-${arch}.zip"
+          Compress-Archive -Path "${appName}.exe" -DestinationPath $zipName
+          echo "artifact_name=$zipName" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: ${{ steps.package.outputs.artifact_name }}

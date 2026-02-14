@@ -23,7 +23,7 @@ typedef LONG NTSTATUS;
 
 #define PATH_BUF_SIZE 8192
 #define FILE_BUF_SIZE (64 * 1024)
-#define VERSION L"0.1.0"
+#define VERSION L"dev"
 
 // --- Data Structures ---
 typedef struct {
