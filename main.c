@@ -6,6 +6,7 @@
 #include <string.h>
 #include <wchar.h>
 #include <windows.h>
+#include <winnt.h>
 
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
@@ -522,6 +523,16 @@ void print_help() {
 int wmain(int argc, wchar_t **argv) {
   // swith STDOUT to Unicode Mode
   _setmode(_fileno(stdout), _O_U16TEXT);
+  LARGE_INTEGER frequency;
+  LARGE_INTEGER start_time, end_time;
+
+  // Retrieve frequency of the high-resolution performance counter
+  if (!QueryPerformanceFrequency(&frequency)) {
+    fwprintf(stderr, L"Fatal: High-resolution performance counter not supported.\n");
+    return 1;
+  }
+  // start timer
+  QueryPerformanceCounter(&start_time);
 
   if (argc < 2) {
     print_help();
@@ -618,8 +629,13 @@ int wmain(int argc, wchar_t **argv) {
     fprintf(out_ctx.stream, "\n]\n");
   }
 
+  // stop timer
+  QueryPerformanceCounter(&end_time);
+  // calculate elapsed in second
+  double elapsed = (double)(end_time.QuadPart - start_time.QuadPart) / frequency.QuadPart;
+
   clear_progress_line();
-  wprintf(L"Done.\n");
+  wprintf(L"Done. Executed in %.3f seconds.\n", elapsed);
   if (out_path) {
     wprintf(L"Output written to %ls", out_path);
     fclose(out_ctx.stream);
