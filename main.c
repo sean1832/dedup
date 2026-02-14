@@ -1,6 +1,7 @@
 
 #include <fcntl.h>
 #include <io.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -381,6 +382,106 @@ int cmp_hash(const void *a, const void *b) {
   return memcmp(fa->hash, fb->hash, 16);
 }
 
+// --- process logic ---
+static void process_identical_size_group(FileInfo **group, size_t count, OutputContext *ctx, BOOL hardlink_mode, size_t total_files, size_t base_index) {
+    // Pass 2: compute partial Hash of first 64KB
+    for (size_t file_idx = 0; file_idx < count; file_idx++) {
+        print_progress(base_index+file_idx+1, total_files, L"Pre-Scan", group[file_idx]->path);
+        if (!get_file_hash(group[file_idx]->path, group[file_idx]->hash, FILE_BUF_SIZE)){
+            group[file_idx]->error = 1;
+        }
+    }
+    // sort by partial hash
+    qsort(group, count, sizeof(FileInfo *), cmp_hash);
+    // group by partial hash
+    size_t partial_start = 0;
+    while (partial_start < count) {
+        size_t partial_end = partial_start + 1;
+        while (partial_end < count && memcmp(group[partial_end]->hash, group[partial_start]->hash, 16) == 0) {
+            partial_end++;
+        }
+
+        // if sub group has more than 1 file, compute full hash
+        if (partial_end - partial_start > 1) {
+            // pass 3: full hash logic
+            for (size_t scan_idx = partial_start; scan_idx < partial_end; scan_idx++) {
+                if (group[scan_idx]->error) continue;
+
+                // if file fits within the partial buffer, the partial hash IS the full hash, in this case skip
+                if (group[scan_idx]->size <= FILE_BUF_SIZE) continue;
+
+                print_progress(base_index + scan_idx + 1, total_files, L"Full-Scan", group[scan_idx]->path);
+                if (!get_file_hash(group[scan_idx]->path, group[scan_idx]->hash, 0)){ // full hash
+                    group[scan_idx]->error =  1;
+                }
+            }
+
+            // sort by full hash
+            qsort(&group[partial_start], partial_end - partial_start, sizeof(FileInfo *), cmp_hash);
+
+            // group by full hash & process matches
+            size_t match_start = partial_start;
+            while (match_start < partial_end) {
+                size_t match_end = match_start + 1;
+                while (match_end < partial_end && memcmp(group[match_end]->hash, group[match_start]->hash, 16) == 0) {
+                    match_end++;
+                }
+                if (group[match_start]->error) {
+                    match_start = match_end;
+                    continue;
+                }
+
+                if (match_end - match_start > 1) {
+                    // confirmed structural match
+                    clear_progress_line();
+                    report_duplicates(ctx, &group[match_start], match_end - match_start);
+
+                    if (hardlink_mode) {
+                        if (!populate_file_id(group[match_start])) {
+                            fwprintf(stderr, L"Failed to populate file ID for source %ls. Skipping group.\n", group[match_start]->path);
+                        } else {
+                            for (size_t dup_idx = match_start + 1; dup_idx < match_end; dup_idx++) {
+                                if (!populate_file_id(group[dup_idx])){
+                                    fwprintf(stderr, L"Failed to read metadata for duplicate %ls\n", group[dup_idx]->path);
+                                    continue;
+                                }
+
+                                // existing hardlink check
+                                if (group[match_start]->volume_serial == group[dup_idx]->volume_serial &&
+                                    group[match_start]->file_index_high == group[dup_idx]->file_index_high &&
+                                    group[match_start]->file_index_low  == group[dup_idx]->file_index_low) {
+                                    wprintf(L"Skipped: %ls is already hardlinked to source.\n", group[dup_idx]->path);
+                                    continue;
+                                }
+
+                                // volume boundary check. Hardlink only accept same volume
+                                if (group[match_start]->volume_serial != group[dup_idx]->volume_serial){
+                                    fwprintf(stderr, L"Skipped: %ls and %ls reside on different volume.\n", group[match_start]->path, group[dup_idx]->path);
+                                    continue;
+                                }
+
+                                // excecution
+                                if (!create_hardlink_replacement(group[match_start]->path, group[dup_idx]->path)){
+                                    fwprintf(stderr, L"Failed to replace %ls\n", group[dup_idx]->path);
+                                } else {
+                                    wprintf(L"Replaced %ls with hardlink to %ls\n", group[dup_idx]->path, group[match_start]->path);
+                                }
+                            }
+                        }
+                    }
+
+                    if (ctx->stream != stdout) {
+                        wprintf(L"\rFound match group... (logged)                             ");
+                        fflush(stdout);
+                    }
+                }
+                match_start = match_end;
+            }
+        }
+        partial_start = partial_end;
+    }
+}
+
 // --- Help message ---
 void print_help() {
     wprintf(L"dedup %ls\n", VERSION);
@@ -476,124 +577,17 @@ int wmain(int argc, wchar_t **argv) {
 
   // --- Main Processing Loop ---
   // Pass 1: Group by Size
-  size_t i = 0;
-  while (i < list.count) {
-    size_t j = i + 1;
-    while (j < list.count && list.files[j]->size == list.files[i]->size)
-      j++;
+  size_t size_start = 0;
+  while (size_start < list.count) {
+    size_t size_end = size_start + 1;
+    while (size_end < list.count && list.files[size_end]->size == list.files[size_start]->size)
+      size_end++;
 
     // if file size group has more than 1 file, process further
-    if (j - i > 1) {
-      // Pass 2: compute partial Hash of first 64KB
-      for (size_t k = i; k < j; k++) {
-        print_progress(k + 1, list.count, L"Pre-Scan", list.files[k]->path);
-        if (!get_file_hash(list.files[k]->path,
-                           list.files[k]->hash, FILE_BUF_SIZE)) { // first 64KB
-          list.files[k]->error =
-              1; // mark error, will be sorted to end and not match anything
-        }
-      }
-
-      // sort by partial Hash
-      qsort(&list.files[i], j - i, sizeof(FileInfo *), cmp_hash);
-
-      // group by partial Hash
-      size_t p = i;
-      while (p < j) {
-        size_t q = p + 1;
-        while (q < j &&
-               memcmp(list.files[q]->hash, list.files[p]->hash, 16) == 0) {
-          q++; // group with same partial Hash
-        }
-
-        // if group has more than 1 file, compute full Hash and compare
-        if (q - p > 1) {
-          // Pass 3: compute full Hash for this group
-          for (size_t k = p; k < q; k++) {
-            if (list.files[k]->error)
-              continue; // skip error files
-
-            // Optimization: if file is small enough, partial hash IS full hash
-            if (list.files[k]->size <= FILE_BUF_SIZE)
-              continue;
-
-            print_progress(k + 1, list.count, L"Full-Scan",
-                           list.files[k]->path);
-            if (!get_file_hash(list.files[k]->path,
-                               list.files[k]->hash, 0)) {
-              list.files[k]->error = 1;
-            }
-          }
-
-          // sort by full Hash
-          qsort(&list.files[p], q - p, sizeof(FileInfo *), cmp_hash);
-
-          // group by full Hash and report matches
-          size_t x = p;
-          while (x < q) {
-            size_t y = x + 1;
-            while (y < q &&
-                   memcmp(list.files[y]->hash, list.files[x]->hash, 16) == 0)
-              y++;
-
-            // Check if valid group (no errors)
-            if (list.files[x]->error) {
-              x = y;
-              continue;
-            }
-
-            if (y - x > 1) {
-              // Match Found
-              clear_progress_line();
-              report_duplicates(&out_ctx, &list.files[x], y - x);
-              // hardlink
-              if (hardlink_mode) {
-                  if (!populate_file_id(list.files[x])) {
-                    fwprintf(stderr, L"Failed to populate file ID for %ls. Skipping hardlinking for this group.\n", list.files[x]->path);
-                    continue;
-                  }
-
-                  // Replace duplicates with hardlinks to the first file in the group
-                  for (size_t k = x + 1; k < y; k++) {
-                      if (!populate_file_id(list.files[k])) {
-                          fwprintf(stderr, L"Failed to read metadata for duplicate %ls\n", list.files[k]->path);
-                          continue;
-                      }
-
-                      // checking existing hardlink, if exist continue
-                      if (list.files[x]->volume_serial == list.files[k]->volume_serial &&
-                          list.files[x]->file_index_high == list.files[k]->file_index_high &&
-                          list.files[x]->file_index_low == list.files[k]->file_index_low) {
-                              wprintf(L"Skipped: %ls is already hardlinked to source.\n", list.files[k]->path);
-                              continue;
-                          }
-                      // volume boundary check
-                      if (list.files[x]->volume_serial != list.files[k]->volume_serial) {
-                          fwprintf(stderr, L"Skipped: %ls and %ls reside on different volume.\n", list.files[x]->path, list.files[k]->path);
-                          continue;
-                      }
-
-                      // create hardlink replacement
-                      if (!create_hardlink_replacement(list.files[x]->path, list.files[k]->path)){
-                          fwprintf(stderr, L"Failed to replace %ls\n", list.files[k]->path);
-                      } else {
-                          wprintf(L"Replace %ls with hardlink to %ls\n", list.files[x]->path, list.files[k]->path);
-                      }
-                  }
-              }
-
-              if (out_path) {
-                wprintf(L"\rFound match group... (logged)    ");
-                fflush(stdout);
-              }
-            }
-            x = y;
-          }
-        }
-        p = q;
-      }
+    if (size_end - size_start > 1) {
+        process_identical_size_group(&list.files[size_start], size_end-size_start, &out_ctx, hardlink_mode, list.count, size_start);
     }
-    i = j;
+    size_start = size_end;
   }
 
   if (out_ctx.format == FORMAT_JSON) {
