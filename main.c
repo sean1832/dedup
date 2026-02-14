@@ -1,3 +1,4 @@
+#include <corecrt_wstring.h>
 #include <fcntl.h>
 #include <io.h>
 #include <stddef.h>
@@ -256,10 +257,25 @@ cleanup:
 void list_add(FileList *list, wchar_t *path, unsigned __int64 size) {
   if (list->count == list->capacity) {
     list->capacity = (list->capacity == 0) ? 1024 : list->capacity * 2;
-    list->files = realloc(list->files, list->capacity * sizeof(FileInfo *));
+    FileInfo **new_files = realloc(list->files, list->capacity * sizeof(FileInfo *));
+    if (!new_files) {
+      fwprintf(stderr, L"Fatal: Failed to reallocate file list.\n");
+      exit(EXIT_FAILURE);
+    }
+    list->files = new_files;
   }
   FileInfo *fi = calloc(1, sizeof(FileInfo));
+  if (!fi) {
+    fwprintf(stderr, L"Fatal: Failed to allocate FileInfo.\n");
+    exit(EXIT_FAILURE);
+  }
+
   fi->path = _wcsdup(path);
+  if (!fi->path) {
+    fwprintf(stderr, L"Fatal: Failed to duplicate path string.\n");
+    free(fi);
+    exit(EXIT_FAILURE);
+  }
   fi->size = size;
   list->files[list->count++] = fi;
 }
