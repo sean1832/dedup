@@ -1,3 +1,4 @@
+
 #include <fcntl.h>
 #include <io.h>
 #include <stdio.h>
@@ -5,6 +6,7 @@
 #include <string.h>
 #include <wchar.h>
 #include <windows.h>
+#include <winnt.h>
 
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
@@ -21,7 +23,7 @@ typedef LONG NTSTATUS;
 
 #define PATH_BUF_SIZE 8192
 #define FILE_BUF_SIZE (64 * 1024)
-#define VERSION L"0.0.5"
+#define VERSION L"0.1.0"
 
 // --- Data Structures ---
 typedef struct {
@@ -29,6 +31,12 @@ typedef struct {
   unsigned __int64 size;
   BYTE hash[16]; // generic hash buffer (fixed to 16 bytes for 128-bit XXH3)
   int error;
+
+  // File ID metadata
+  DWORD volume_serial;
+  DWORD file_index_high;
+  DWORD file_index_low;
+  int id_populated; // flag to indicate if file ID has been populated
 } FileInfo;
 
 // --- Hashing Wrappers ---
@@ -77,7 +85,7 @@ typedef struct {
 } OutputContext;
 
 // --- Helper: Progress Display ---
-// prints: [Stage] 10/500 (2.0%) C:\path\to\file.txt      <-- spaces to clear
+// prints: [Stage] 10/500 (2.0%) C:\path\to\file.txt
 // leftovers
 void print_progress(size_t current, size_t total, const wchar_t *stage,
                     const wchar_t *path) {
@@ -291,6 +299,61 @@ void scan_dir(const wchar_t *basePath, FileList *list) {
   FindClose(hFind);
 }
 
+int populate_file_id(FileInfo *fi) {
+    if (fi->id_populated) return 1;
+
+    // open handle with 0 access rights to read metadata without locking or trigger IO reads
+    HANDLE hFile = CreateFileW(fi->path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        fi->error = 1;
+        return 0;
+    }
+
+    BY_HANDLE_FILE_INFORMATION fileInfo;
+    if (GetFileInformationByHandle(hFile, &fileInfo)) {
+        fi->volume_serial = fileInfo.dwVolumeSerialNumber;
+        fi->file_index_high = fileInfo.nFileIndexHigh;
+        fi->file_index_low = fileInfo.nFileIndexLow;
+        fi->id_populated = 1;
+    } else {
+        fi->error = 1;
+    }
+
+    CloseHandle(hFile);
+    return fi->id_populated;
+}
+
+
+// --- Hardlinks ---
+
+// Replace duplicate with hardlink to source. Returns 1 on success, 0 on failure.
+int create_hardlink_replacement(const wchar_t *source, const wchar_t *duplicate) {
+    wchar_t temp_path[PATH_BUF_SIZE];
+    if (swprintf(temp_path, PATH_BUF_SIZE, L"%ls.dedup_temp", duplicate) < 0) {
+        fwprintf(stderr, L"Error creating temp path for %ls: %lu\n", duplicate, GetLastError());
+        return 0; // Failed to create temp path
+    }
+    if (!MoveFileW(duplicate, temp_path)) {
+        fwprintf(stderr, L"Error moving original file to temp path for %ls: %lu\n", duplicate, GetLastError());
+        return 0; // Failed to move original file to temp path
+    }
+    if (!CreateHardLinkW(duplicate, source, NULL)) {
+        fwprintf(stderr, L"Error creating hardlink from %ls to %ls: %lu\n", source, duplicate, GetLastError());
+
+        // rollback: move temp file back to original location
+        if (!MoveFileW(temp_path, duplicate)) {
+            fwprintf(stderr, L"CRITICAL: Failed to rollback after hardlink failure for %ls: %lu\n", duplicate, GetLastError());
+        }
+        return 0; // Failed to create hardlink
+    }
+
+    // success, delete the temp file
+    if (!DeleteFileW(temp_path)) {
+        fwprintf(stderr, L"Warning: Failed to delete temp file %ls after hardlink creation: %lu\n", temp_path, GetLastError());
+    }
+    return 1; // Success
+}
+
 // --- Comparators ---
 
 int cmp_size(const void *a, const void *b) {
@@ -318,20 +381,30 @@ int cmp_hash(const void *a, const void *b) {
   return memcmp(fa->hash, fb->hash, 16);
 }
 
-// --- Main ---
+// --- Help message ---
+void print_help() {
+    wprintf(L"dedup %ls\n", VERSION);
+    wprintf(L"Usage: dedup <directory> [OPTIONS]\n");
+    wprintf(L"Options:\n");
+    wprintf(L"  -o, --output <file>   Write output to file (JSON if .json extension)\n");
+    wprintf(L"  -l, --hardlink        Replace duplicates with hardlinks (destructive!)\n");
 
+    wprintf(L"  -s, --silent          Silent mode\n");
+    wprintf(L"  -h, --help            Show this help message\n");
+}
+
+// --- Main ---
 int wmain(int argc, wchar_t **argv) {
   // swith STDOUT to Unicode Mode
   _setmode(_fileno(stdout), _O_U16TEXT);
 
   if (argc < 2) {
-    wprintf(L"dedup %ls\n", VERSION);
-    wprintf(
-        L"Usage: dedup <directory> [-o <output_file>]\n");
+    print_help();
     return 1;
   }
   wchar_t *dir_path = NULL;
   wchar_t *out_path = NULL;
+  BOOL hardlink_mode = FALSE;
 
   // arg parsing
   for (int i = 1; i < argc; i++) {
@@ -342,11 +415,27 @@ int wmain(int argc, wchar_t **argv) {
         fwprintf(stderr, L"Error: --output requires a filename.\n");
         return 1;
       }
+    } else if (wcscmp(argv[i], L"-l") == 0 || wcscmp(argv[i], L"--hardlink") == 0) {
+        // if silent mode is enabled, don't show the prompt.
+        if (wcscmp(argv[i], L"-s") != 0 && wcscmp(argv[i], L"--silent") != 0) {
+            wprintf(L"WARNING: Hardlink mode is destructive! This will replace duplicate files with hardlinks to save space, but it will DELETE the duplicates. Make sure you have a backup before using this option.\n");
+            wprintf(L"Do you want to proceed? (y/N): ");
+            wchar_t response = getwchar();
+            if (response != L'y' && response != L'Y') {
+                wprintf(L"Aborting.\n");
+                return 0;
+            }
+        }
+        hardlink_mode = TRUE;
+    } else if (wcscmp(argv[i], L"-h") == 0 || wcscmp(argv[i], L"--help") == 0) {
+        print_help();
+        return 0;
     } else if (argv[i][0] == '-') {
-      fwprintf(stderr, L"Unknown option: %s\n", argv[i]);
-      return 1;
+        fwprintf(stderr, L"Unknown option: %s\n", argv[i]);
+        print_help();
+        return 1;
     } else {
-      dir_path = argv[i];
+        dir_path = argv[i];
     }
   }
   if (!dir_path) {
@@ -368,8 +457,8 @@ int wmain(int argc, wchar_t **argv) {
 
     // detect JSON extension
     wchar_t *ext = wcsrchr(out_path, '.');
-    if (ext && _wcsicmp(ext, L".json") ==
-                   0) { // _wcsicmp for case-insensitive comparison (Windows)
+    if (ext && _wcsicmp(ext, L".json") == 0) {
+      // _wcsicmp for case-insensitive comparison (Windows)
       out_ctx.format = FORMAT_JSON;
     }
   }
@@ -456,8 +545,42 @@ int wmain(int argc, wchar_t **argv) {
             if (y - x > 1) {
               // Match Found
               clear_progress_line();
-
               report_duplicates(&out_ctx, &list.files[x], y - x);
+              // hardlink
+              if (hardlink_mode) {
+                  if (!populate_file_id(list.files[x])) {
+                    fwprintf(stderr, L"Failed to populate file ID for %ls. Skipping hardlinking for this group.\n", list.files[x]->path);
+                    continue;
+                  }
+
+                  // Replace duplicates with hardlinks to the first file in the group
+                  for (size_t k = x + 1; k < y; k++) {
+                      if (!populate_file_id(list.files[k])) {
+                          fwprintf(stderr, L"Failed to read metadata for duplicate %ls\n", list.files[k]->path);
+                          continue;
+                      }
+
+                      // checking existing hardlink, if exist continue
+                      if (list.files[x]->volume_serial == list.files[k]->volume_serial &&
+                          list.files[x]->file_index_high == list.files[k]->file_index_high &&
+                          list.files[x]->file_index_low == list.files[k]->file_index_low) {
+                              wprintf(L"Skipped: %ls is already hardlinked to source.\n", list.files[k]->path);
+                              continue;
+                          }
+                      // volume boundary check
+                      if (list.files[x]->volume_serial != list.files[k]->volume_serial) {
+                          fwprintf(stderr, L"Skipped: %ls and %ls reside on different volume.\n", list.files[x]->path, list.files[k]->path);
+                          continue;
+                      }
+
+                      // create hardlink replacement
+                      if (!create_hardlink_replacement(list.files[x]->path, list.files[k]->path)){
+                          fwprintf(stderr, L"Failed to replace %ls\n", list.files[k]->path);
+                      } else {
+                          wprintf(L"Replace %ls with hardlink to %ls\n", list.files[x]->path, list.files[k]->path);
+                      }
+                  }
+              }
 
               if (out_path) {
                 wprintf(L"\rFound match group... (logged)    ");
