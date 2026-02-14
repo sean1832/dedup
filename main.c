@@ -1,4 +1,3 @@
-#include <corecrt_wstring.h>
 #include <fcntl.h>
 #include <io.h>
 #include <stddef.h>
@@ -7,7 +6,6 @@
 #include <string.h>
 #include <wchar.h>
 #include <windows.h>
-#include <winnt.h>
 
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
@@ -88,8 +86,7 @@ typedef struct {
 // --- Helper: Progress Display ---
 // prints: [Stage] 10/500 (2.0%) C:\path\to\file.txt
 // leftovers
-void print_progress(size_t current, size_t total, const wchar_t *stage,
-                    const wchar_t *path) {
+void print_progress(size_t current, size_t total, const wchar_t *stage, const wchar_t *path) {
   double percent = (double)current / total * 100.0;
 
   // %ls for wide strings in wprintf/printf
@@ -105,8 +102,7 @@ void print_progress(size_t current, size_t total, const wchar_t *stage,
 
 void clear_progress_line() {
   // Overwrite the entire line with spaces, then return to start
-  wprintf(L"\r                                                                 "
-          L"               \r");
+  wprintf(L"\r                                                                                \r");
   fflush(stdout);
 }
 
@@ -358,7 +354,7 @@ int populate_file_id(FileInfo *fi) {
 // Replace duplicate with hardlink to source. Returns 1 on success, 0 on failure.
 int create_hardlink_replacement(const wchar_t *source, const wchar_t *duplicate) {
     wchar_t temp_path[PATH_BUF_SIZE];
-    if (swprintf(temp_path, PATH_BUF_SIZE, L"%ls.dedup_temp", duplicate) < 0) {
+    if (swprintf_s(temp_path, PATH_BUF_SIZE, L"%ls.dedup_temp", duplicate) < 0) {
         fwprintf(stderr, L"Error creating temp path for %ls: %lu\n", duplicate, GetLastError());
         return 0; // Failed to create temp path
     }
