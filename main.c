@@ -1,4 +1,3 @@
-
 #include <fcntl.h>
 #include <io.h>
 #include <stddef.h>
@@ -268,14 +267,28 @@ void list_add(FileList *list, wchar_t *path, unsigned __int64 size) {
 // --- Directory Scanning ---
 
 void scan_dir(const wchar_t *basePath, FileList *list) {
-  wchar_t searchPath[PATH_BUF_SIZE];
+  size_t base_len = wcslen(basePath);
+  if (base_len + 3 >= PATH_BUF_SIZE) {
+    fwprintf(stderr, L"Path too long, skipping: %ls\n", basePath);
+    return;
+  }
+
+  wchar_t *searchPath = malloc(PATH_BUF_SIZE * sizeof(wchar_t));
+  wchar_t *fullPath = malloc(PATH_BUF_SIZE * sizeof(wchar_t));
+  if (!searchPath || !fullPath) {
+    fwprintf(stderr, L"Fatal: Memory allocation failed during scan.\n");
+    exit(EXIT_FAILURE);
+  }
   swprintf(searchPath, PATH_BUF_SIZE, L"%ls\\*", basePath);
 
   WIN32_FIND_DATAW fd;
   HANDLE hFind = FindFirstFileW(searchPath, &fd);
 
-  if (hFind == INVALID_HANDLE_VALUE)
+  if (hFind == INVALID_HANDLE_VALUE){
+    free(searchPath);
+    free(fullPath);
     return;
+  }
 
   do {
     if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
@@ -285,7 +298,6 @@ void scan_dir(const wchar_t *basePath, FileList *list) {
     if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
       continue;
 
-    wchar_t fullPath[PATH_BUF_SIZE];
     swprintf(fullPath, PATH_BUF_SIZE, L"%ls\\%ls", basePath, fd.cFileName);
 
     if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
